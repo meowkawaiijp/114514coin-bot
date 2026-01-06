@@ -1,4 +1,5 @@
 import discord
+import io
 from discord import app_commands
 from bot.config_store import config_store
 from bot.monitor import monitor
@@ -271,6 +272,7 @@ def setup_commands(tree: app_commands.CommandTree, bot: discord.Client):
         embed.set_footer(text=f"閾値: ±{threshold}%")
         
         # チャート画像の生成
+        file = None
         history = monitor.get_recent_history(symbol)
         if len(history) > 2:
             try:
@@ -304,15 +306,24 @@ def setup_commands(tree: app_commands.CommandTree, bot: discord.Client):
                         }
                     }
                 }
-                import json
-                import urllib.parse
-                chart_json = json.dumps(qc_config)
-                chart_url = f"https://quickchart.io/chart?c={urllib.parse.quote(chart_json)}"
-                embed.set_image(url=chart_url)
+                
+                # URL生成ではなくPOSTで画像を取得する (URL長制限回避)
+                session = await mexc_api.get_session()
+                async with session.post("https://quickchart.io/chart", json={"chart": qc_config, "width": 500, "height": 300, "backgroundColor": "white"}) as resp:
+                    if resp.status == 200:
+                        image_data = await resp.read()
+                        file = discord.File(io.BytesIO(image_data), filename="chart.png")
+                        embed.set_image(url="attachment://chart.png")
+                    else:
+                         print(f"QuickChart error: {resp.status}")
+
             except Exception as e:
                 print(f"Chart generation error: {e}")
 
-        await interaction.followup.send(embed=embed)
+        if file:
+            await interaction.followup.send(embed=embed, file=file)
+        else:
+            await interaction.followup.send(embed=embed)
 
     # /calc コマンド
     @tree.command(name="calc", description="保有コイン数を日本円に換算します")

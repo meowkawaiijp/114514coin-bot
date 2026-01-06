@@ -1,5 +1,6 @@
 import asyncio
 import time
+import io
 from collections import deque
 from typing import Dict, Deque, Tuple, Optional, List, Union
 from bot.mexc_api import mexc_api
@@ -218,8 +219,9 @@ class PriceMonitor:
         })
         
         try:
-            from discord import Embed
+            from discord import Embed, File
             discord_embed = Embed.from_dict(embed_dict)
+            file = None
             
             # QuickChart (共通ロジック)
             history = self.get_recent_history(config.symbol)
@@ -251,15 +253,24 @@ class PriceMonitor:
                             }
                         }
                     }
-                    import json
-                    import urllib.parse
-                    chart_json = json.dumps(qc_config)
-                    chart_url = f"https://quickchart.io/chart?c={urllib.parse.quote(chart_json)}"
-                    discord_embed.set_image(url=chart_url)
+                    
+                    # URL生成ではなくPOSTで画像を取得する (URL長制限回避)
+                    session = await mexc_api.get_session()
+                    async with session.post("https://quickchart.io/chart", json={"chart": qc_config, "width": 500, "height": 300, "backgroundColor": "white"}) as resp:
+                        if resp.status == 200:
+                            image_data = await resp.read()
+                            file = File(io.BytesIO(image_data), filename="chart.png")
+                            discord_embed.set_image(url="attachment://chart.png")
+                        else:
+                            print(f"QuickChart error: {resp.status}")
+                            
                 except Exception as e:
                     print(f"Chart error: {e}")
 
-            await target.send(embed=discord_embed)
+            if file:
+                await target.send(embed=discord_embed, file=file)
+            else:
+                await target.send(embed=discord_embed)
         except Exception as e:
             print(f"Error sending notification to {target_id}: {e}")
 
