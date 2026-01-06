@@ -4,6 +4,7 @@ from bot.config_store import config_store
 from bot.monitor import monitor
 from bot.mexc_api import mexc_api
 from bot.exchange_rate import exchange_rate_api
+from bot.dex_api import dex_api
 
 def setup_commands(tree: app_commands.CommandTree, bot: discord.Client):
     
@@ -344,5 +345,93 @@ def setup_commands(tree: app_commands.CommandTree, bot: discord.Client):
         embed.add_field(name="保有枚数", value=f"{amount:,.0f} {symbol.replace('USDT', '')}", inline=False)
         embed.add_field(name="現在レート", value=f"1枚 = {price_jpy:.4f}円", inline=False)
         embed.add_field(name="評価額", value=f"**{total_jpy:,.0f} 円**\n(${total_usd:,.2f})", inline=False)
+        
+        await interaction.followup.send(embed=embed)
+
+    # /check コマンド
+    @tree.command(name="check", description="トークンの流動性と時価総額の健全性をチェックします")
+    @app_commands.describe(symbol="チェックするトークン名またはアドレス（省略時は現在の監視対象）")
+    async def check(interaction: discord.Interaction, symbol: str = None):
+        await interaction.response.defer()
+        
+        # シンボル未指定時の処理
+        if symbol is None:
+            # コンテキストからシンボル取得
+             if interaction.channel_id in config_store.configs:
+                 symbol = config_store.configs[interaction.channel_id].symbol
+             elif interaction.guild is None and interaction.user.id in config_store.user_configs: # DM
+                 symbol = config_store.user_configs[interaction.user.id].symbol
+             
+             if symbol:
+                 # "114514USDT" -> "114514" のように整形
+                 symbol = symbol.upper().replace("USDT", "").replace("MEXC", "")
+             else:
+                 await interaction.followup.send("シンボルを指定してください。例: `/check symbol:114514`")
+                 return
+        
+        # シンボルが見つかってもUSDTなどがついてる場合があるので除去
+        search_query = symbol.upper().replace("USDT", "")
+
+        stats = await dex_api.get_token_stats(search_query)
+        
+        if not stats:
+            await interaction.followup.send(f"トークン `{search_query}` の情報がDexScreenerで見つかりませんでした。")
+            return
+            
+        # データの抽出
+        base_token = stats.get("baseToken", {})
+        token_name = base_token.get("name", "Unknown")
+        token_symbol = base_token.get("symbol", search_query)
+        price_usd = float(stats.get("priceUsd", 0) or 0)
+        
+        liquidity = float(stats.get("liquidity", {}).get("usd", 0) or 0)
+        # marketCapがあれば使う、なければfdvを使う
+        market_cap = float(stats.get("marketCap", 0) or stats.get("fdv", 0) or 0)
+        
+        url = stats.get("url", "https://dexscreener.com/")
+        
+        if liquidity == 0:
+             await interaction.followup.send(f"トークン `{token_symbol}` の流動性情報が取得できませんでした（Liquidity: $0）。")
+             return
+
+        # 比率計算 (Market Cap / Liquidity)
+        ratio = market_cap / liquidity if liquidity > 0 else 0
+        
+        # 評価ロジック
+        risk_level = "不明"
+        risk_color = 0x95a5a6 # Gray
+        comment = ""
+        
+        # 判定基準
+        if ratio > 50:
+            risk_level = "🔥 非常に危険 (Very High Risk)"
+            risk_color = 0xff0000 # Red
+            comment = f"時価総額が流動性の**{ratio:.0f}倍**もあります。非常に流動性が薄く、売り圧で暴落しやすい状態です。"
+        elif ratio > 20:
+            risk_level = "⚠️ 危険 (High Risk)"
+            risk_color = 0xe67e22 # Orange
+            comment = f"時価総額が流動性の{ratio:.0f}倍です。ボラティリティが高くなる傾向があります。"
+        elif ratio > 5:
+            risk_level = "🤔 普通 (Medium)"
+            risk_color = 0xf1c40f # Yellow
+            comment = "ミームコインとしては一般的な水準です。"
+        else:
+            risk_level = "✅ 健全 (Good)"
+            risk_color = 0x2ecc71 # Green
+            comment = "時価総額に対して十分な流動性があります。"
+
+        ratio_str = f"{ratio:.1f}倍"
+
+        # Embed作成
+        embed = discord.Embed(title=f"🛡️ トークン健全性チェック: {token_name} ({token_symbol})", color=risk_color, url=url)
+        embed.add_field(name="現在価格", value=f"${price_usd:.8f}", inline=True)
+        embed.add_field(name="時価総額 (MCap)", value=f"${market_cap:,.0f}", inline=True)
+        embed.add_field(name="流動性 (Liquidity)", value=f"${liquidity:,.0f}", inline=True)
+        
+        embed.add_field(name="MCap / Liq 比率", value=f"**{ratio_str}**", inline=False)
+        embed.add_field(name="判定", value=risk_level, inline=False)
+        embed.add_field(name="コメント", value=comment, inline=False)
+             
+        embed.set_footer(text="Data provided by DexScreener")
         
         await interaction.followup.send(embed=embed)
